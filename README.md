@@ -14,7 +14,7 @@ El propósito es que diferentes usuarios de la compañía puedan acceder al app 
 
 ## Nota importante
 
-- Si corres `streamlit run ruta.py` localmente, dependerá de su computadora y su terminal.
+- Si corre `streamlit run ruta.py` localmente, dependerá de su computadora y su terminal.
 
 ## Uso
 
