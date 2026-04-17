@@ -4,13 +4,7 @@ Este proyecto contiene un app Streamlit en `ruta.py` para cargar un archivo `.cs
 
 ## Objetivo
 
-El propósito es que tus usuarios puedan acceder al app mediante una URL y subir su archivo sin depender de tu kernel o terminal local.
-
-## ¿Qué necesitas?
-
-1. Subir el proyecto a un repositorio GitHub.
-2. Desplegar el app en un servicio de hosting para aplicaciones web.
-3. El servicio ejecutará `streamlit run ruta.py` en un servidor, y tus usuarios accederán por URL.
+El propósito es que diferentes usuarios puedan acceder al app mediante una URL y subir su archivo.
 
 ## Servicios recomendados
 
