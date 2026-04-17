@@ -7,13 +7,16 @@ import time
 from geopy.geocoders import ArcGIS
 from geopy.distance import geodesic
 
-# Punto de partida fijo de la empresa
+# Configuración de la aplicación
+# Punto de partida fijo de la empresa desde donde se calculan las distancias
 ORIGIN_ADDRESS = 'Calle 17 #43F-235, Medellin, Colombia'
+# Sugerencia de ciudad para direcciones incompletas
 CITY_HINT = 'Medellín, Colombia'
-# Inicializar geolocator
+# Inicializar el geocodificador de ArcGIS para convertir direcciones en coordenadas
 gen = ArcGIS()
 
 
+# Función para geocodificar una dirección y obtener latitud y longitud
 def geocode_address(address):
     try:
         location = gen.geocode(address, timeout=15)
@@ -24,6 +27,7 @@ def geocode_address(address):
         return None, None
 
 
+# Función para calcular la distancia en kilómetros entre dos puntos usando OSRM o distancia geodésica como respaldo
 def calculate_distance(lat1, lon1, lat2, lon2):
     try:
         url = f"https://router.project-osrm.org/route/v1/driving/{lon1},{lat1};{lon2},{lat2}?overview=false"
@@ -36,6 +40,7 @@ def calculate_distance(lat1, lon1, lat2, lon2):
         return geodesic((lat1, lon1), (lat2, lon2)).km
 
 
+# Función para cargar un archivo CSV desde un buffer de bytes, intentando diferentes codificaciones
 def load_csv_buffer(buffer):
     text = None
     try:
@@ -50,6 +55,7 @@ def load_csv_buffer(buffer):
             raise ValueError(f'No se pudo leer el CSV: {exc}')
 
 
+# Función para cargar un archivo subido (CSV o Excel) y devolver un DataFrame de pandas
 def load_file(uploaded_file):
     name = uploaded_file.name
     ext = os.path.splitext(name)[1].lower()
@@ -60,6 +66,7 @@ def load_file(uploaded_file):
     raise ValueError('Sólo se aceptan archivos .csv o .xlsx')
 
 
+# Función para encontrar la columna de dirección en el DataFrame buscando nombres comunes
 def find_address_column(df):
     candidates = ['Shipping Address1', 'Shipping Street', 'Shipping Address', 'Billing Address1', 'Address']
     for col in candidates:
@@ -68,6 +75,7 @@ def find_address_column(df):
     raise ValueError('No se encontró columna de dirección válida en el archivo.')
 
 
+# Función para limpiar el DataFrame agrupando por 'Name' y rellenando valores faltantes hacia adelante y atrás
 def clean_dataframe(df):
     if 'Name' not in df.columns:
         raise ValueError('El archivo debe contener la columna Name para agrupar pedidos.')
@@ -81,6 +89,7 @@ def clean_dataframe(df):
     return df_clean
 
 
+# Función principal para procesar el DataFrame: limpiar, geocodificar direcciones, calcular distancias solo para filas con 'ANT' en Shipping Province, y mostrar progreso
 def process_dataframe(df, delay=0.4):
     df = clean_dataframe(df)
     address_col = find_address_column(df)
@@ -120,6 +129,7 @@ def process_dataframe(df, delay=0.4):
     return df
 
 
+# Función para convertir un DataFrame a bytes de un archivo Excel
 def to_excel_bytes(df):
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
@@ -127,6 +137,7 @@ def to_excel_bytes(df):
     return output.getvalue()
 
 
+# Función principal de la aplicación Streamlit: configura la página, muestra el header con logo, maneja la subida de archivos, procesa datos y permite descarga
 def app():
     st.set_page_config(page_title='Cálculo de distancias de entrega Terceros', layout='wide')
     
@@ -173,6 +184,7 @@ def app():
         st.write('Puedes descargar el archivo con la columna `Distance (km)` agregada.')
 
 
+# Bloque principal para ejecutar la aplicación cuando el script se corre directamente
 if __name__ == '__main__':
     app()
 
