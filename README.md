@@ -24,8 +24,7 @@ El propósito es que diferentes usuarios de la compañía puedan acceder al app 
 - Descarga el archivo resultante con la columna `Distance (km)`.
 - Evalúan la viabilidad de tercerizar aquellas ubicaciones que estén a menos de 3km de distancia desde el COP.
 
-
-
-##Por: 
+  
+## Por:
 
 - Sebastián Sánchez Álvarez, Mejora Continua, CAFÉ PERGAMINO
