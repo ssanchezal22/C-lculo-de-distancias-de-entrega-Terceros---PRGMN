@@ -1,19 +1,95 @@
 import io
 import os
+import re
+import unicodedata
 import pandas as pd
 import requests
 import streamlit as st
 import time
 from geopy.geocoders import ArcGIS
 from geopy.distance import geodesic
+from rapidfuzz import process as fuzz_process
 
 # Configuración de la aplicación
 # Punto de partida fijo de la empresa desde donde se calculan las distancias
 ORIGIN_ADDRESS = 'Calle 17 #43F-235, Medellin, Colombia'
 # Sugerencia de ciudad para direcciones incompletas
 CITY_HINT = 'Medellín, Colombia'
+# Municipios del Valle de Aburrá (normalizados: sin tildes, minúsculas)
+VALLE_ABURRA_CITIES = [
+    'medellin', 'bello', 'itagui', 'envigado', 'sabaneta',
+    'la estrella', 'caldas', 'copacabana', 'girardota', 'barbosa',
+]
+# Umbral de similitud para fuzzy matching (0-100)
+FUZZY_THRESHOLD = 82
+# Nombres de display canónicos para construir queries de geocodificación precisas
+VALLE_ABURRA_DISPLAY = {
+    'medellin': 'Medellín',
+    'bello': 'Bello',
+    'itagui': 'Itagüí',
+    'envigado': 'Envigado',
+    'sabaneta': 'Sabaneta',
+    'la estrella': 'La Estrella',
+    'caldas': 'Caldas',
+    'copacabana': 'Copacabana',
+    'girardota': 'Girardota',
+    'barbosa': 'Barbosa',
+}
+# Bounding box geográfico del Valle de Aburrá para validar coordenadas geocodificadas
+VALLE_LAT_MIN, VALLE_LAT_MAX = 5.9, 6.5
+VALLE_LON_MIN, VALLE_LON_MAX = -75.8, -75.3
+# Número de reintentos para la API de OSRM antes de caer a distancia geodésica
+OSRM_RETRIES = 3
 # Inicializar el geocodificador de ArcGIS para convertir direcciones en coordenadas
 gen = ArcGIS()
+
+
+# Función para normalizar texto: minúsculas, sin tildes, sin contenido entre paréntesis
+def normalize_text(text):
+    text = re.sub(r'\(.*?\)', '', str(text))  # quitar texto entre paréntesis
+    text = text.strip().lower()
+    # descomponer caracteres Unicode y descartar marcas de acento
+    nfkd = unicodedata.normalize('NFKD', text)
+    return ''.join(c for c in nfkd if not unicodedata.combining(c))
+
+
+# Función para determinar si una ciudad pertenece al Valle de Aburrá.
+# Capa 1: coincidencia exacta o substring (rápida).
+# Capa 2: fuzzy matching con rapidfuzz para errores tipográficos (umbral FUZZY_THRESHOLD).
+def is_valle_aburra_city(city_str):
+    city_norm = normalize_text(city_str)
+    if not city_norm:
+        return False
+    # Capa 1: algún municipio es substring del texto normalizado
+    for city in VALLE_ABURRA_CITIES:
+        if city in city_norm:
+            return True
+    # Capa 2: fuzzy matching contra la lista de municipios
+    result = fuzz_process.extractOne(city_norm, VALLE_ABURRA_CITIES)
+    if result is not None and result[1] >= FUZZY_THRESHOLD:
+        return True
+    return False
+
+
+# Retorna el nombre canónico de display del municipio (para construir la query de geocodificación),
+# o None si la ciudad no pertenece al Valle de Aburrá.
+def get_canonical_city(city_str):
+    city_norm = normalize_text(city_str)
+    # Capa 1: substring exacto
+    for key in VALLE_ABURRA_CITIES:
+        if key in city_norm:
+            return VALLE_ABURRA_DISPLAY[key]
+    # Capa 2: fuzzy
+    result = fuzz_process.extractOne(city_norm, VALLE_ABURRA_CITIES)
+    if result is not None and result[1] >= FUZZY_THRESHOLD:
+        return VALLE_ABURRA_DISPLAY[result[0]]
+    return None
+
+
+# Verifica que las coordenadas caigan dentro del bounding box del Valle de Aburrá.
+# Evita aceptar resultados de geocodificación que apunten a otra región de Colombia.
+def is_within_valle_aburra(lat, lon):
+    return VALLE_LAT_MIN <= lat <= VALLE_LAT_MAX and VALLE_LON_MIN <= lon <= VALLE_LON_MAX
 
 
 # Función para geocodificar una dirección y obtener latitud y longitud
@@ -27,17 +103,21 @@ def geocode_address(address):
         return None, None
 
 
-# Función para calcular la distancia en kilómetros entre dos puntos usando OSRM o distancia geodésica como respaldo
+# Función para calcular la distancia en kilómetros entre dos puntos usando OSRM.
+# Reintenta hasta OSRM_RETRIES veces antes de caer a distancia geodésica como respaldo.
 def calculate_distance(lat1, lon1, lat2, lon2):
-    try:
-        url = f"https://router.project-osrm.org/route/v1/driving/{lon1},{lat1};{lon2},{lat2}?overview=false"
-        response = requests.get(url, timeout=15)
-        data = response.json()
-        if 'routes' in data and data['routes']:
-            return data['routes'][0]['distance'] / 1000
-        return geodesic((lat1, lon1), (lat2, lon2)).km
-    except Exception:
-        return geodesic((lat1, lon1), (lat2, lon2)).km
+    url = f"https://router.project-osrm.org/route/v1/driving/{lon1},{lat1};{lon2},{lat2}?overview=false"
+    for attempt in range(OSRM_RETRIES):
+        try:
+            response = requests.get(url, timeout=15)
+            data = response.json()
+            if 'routes' in data and data['routes']:
+                return data['routes'][0]['distance'] / 1000
+        except Exception:
+            pass
+        if attempt < OSRM_RETRIES - 1:
+            time.sleep(1)
+    return geodesic((lat1, lon1), (lat2, lon2)).km
 
 
 # Función para cargar un archivo CSV desde un buffer de bytes, intentando diferentes codificaciones
@@ -66,13 +146,35 @@ def load_file(uploaded_file):
     raise ValueError('Sólo se aceptan archivos .csv o .xlsx')
 
 
-# Función para encontrar la columna de dirección en el DataFrame buscando nombres comunes
-def find_address_column(df):
-    candidates = ['Shipping Address1', 'Shipping Street', 'Shipping Address', 'Billing Address1', 'Address']
-    for col in candidates:
-        if col in df.columns:
-            return col
-    raise ValueError('No se encontró columna de dirección válida en el archivo.')
+# Función que construye la query de geocodificación más completa posible combinando
+# Shipping Street (Address1 + Address2 ya unidos por Shopify), o Address1 + Address2
+# por separado, más la ciudad canónica y provincia para máxima precisión.
+def build_geocode_query(row, canonical_city):
+    def get_col(col):
+        val = row.get(col, '')
+        return str(val).strip() if pd.notna(val) and str(val).strip() not in ('', 'nan') else ''
+
+    street = get_col('Shipping Street')
+    addr1 = get_col('Shipping Address1')
+    addr2 = get_col('Shipping Address2')
+
+    # Preferir Shipping Street si existe (Shopify ya combina Address1 + Address2)
+    if street:
+        base = street
+    elif addr1:
+        # Agregar Address2 solo si aporta info nueva (no es substring de Address1)
+        if addr2 and addr2.lower() not in addr1.lower():
+            base = f"{addr1}, {addr2}"
+        else:
+            base = addr1
+    else:
+        raise ValueError('No se encontró dirección válida en las columnas Shipping Street / Address1.')
+
+    city_suffix = f"{canonical_city}, Antioquia, Colombia"
+    # Evitar duplicar la ciudad si ya aparece en la dirección
+    if canonical_city.lower() in base.lower():
+        return f"{base}, Antioquia, Colombia"
+    return f"{base}, {city_suffix}"
 
 
 # Función para limpiar el DataFrame agrupando por 'Name' y rellenando valores faltantes hacia adelante y atrás
@@ -92,7 +194,6 @@ def clean_dataframe(df):
 # Función principal para procesar el DataFrame: limpiar, geocodificar direcciones, calcular distancias solo para filas con 'ANT' en Shipping Province, y mostrar progreso
 def process_dataframe(df, delay=0.4):
     df = clean_dataframe(df)
-    address_col = find_address_column(df)
 
     origin_lat, origin_lon = geocode_address(ORIGIN_ADDRESS)
     if origin_lat is None or origin_lon is None:
@@ -104,23 +205,27 @@ def process_dataframe(df, delay=0.4):
 
     for idx, row in df.iterrows():
         province = str(row['Shipping Province']) if 'Shipping Province' in df.columns and pd.notna(row['Shipping Province']) else ''
-        if 'ant' not in province.lower():
+        city = str(row['Shipping City']) if 'Shipping City' in df.columns and pd.notna(row['Shipping City']) else ''
+        if 'ant' not in province.lower() or not is_valle_aburra_city(city):
             distances.append('-')
         else:
-            address = str(row[address_col]) if pd.notna(row[address_col]) else ''
-            if not address:
+            canonical_city = get_canonical_city(city)
+            try:
+                full_address = build_geocode_query(row, canonical_city or 'Medellín')
+            except ValueError:
+                distances.append('-')
+                progress.progress((idx + 1) / total)
+                time.sleep(delay)
+                continue
+
+            lat2, lon2 = geocode_address(full_address)
+            if lat2 is None or lon2 is None:
+                distances.append('-')
+            elif not is_within_valle_aburra(lat2, lon2):
+                # El geocodificador apuntó a una zona fuera del Valle de Aburrá
                 distances.append('-')
             else:
-                if CITY_HINT.lower() not in address.lower():
-                    full_address = f"{address}, {CITY_HINT}"
-                else:
-                    full_address = address
-
-                lat2, lon2 = geocode_address(full_address)
-                if lat2 is None or lon2 is None:
-                    distances.append('-')
-                else:
-                    distances.append(calculate_distance(origin_lat, origin_lon, lat2, lon2))
+                distances.append(calculate_distance(origin_lat, origin_lon, lat2, lon2))
 
         progress.progress((idx + 1) / total)
         time.sleep(delay)
@@ -149,7 +254,7 @@ def app():
     
     st.write('Sube un archivo CSV o XLSX, calcularemos la distancia desde el COP a cada dirección de entrega.')
     st.markdown(f'**Punto de partida fijo:** {ORIGIN_ADDRESS}')
-    st.info('Sólo se calcularán distancias para filas donde Shipping Province contenga "ANT". Las demás mostrarán "-".')
+    st.info('Sólo se calcularán distancias para entregas en municipios del Valle de Aburrá (Medellín, Bello, Itagüí, Envigado, Sabaneta, La Estrella, Caldas, Copacabana, Girardota, Barbosa). Las demás filas mostrarán "-".')
 
     uploaded_file = st.file_uploader('Sube un archivo .csv o .xlsx', type=['csv', 'xlsx', 'xls'])
     if uploaded_file is None:
